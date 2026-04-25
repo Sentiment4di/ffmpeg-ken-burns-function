@@ -36,20 +36,23 @@ function writeBase64File(base64, dest) {
 
 function execSafe(cmd) {
   try {
-    return execSync(cmd, { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 180000 });
+    return execSync(cmd, { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 300000 });
   } catch (err) {
     throw new Error(err.stderr ? err.stderr.toString().slice(-800) : err.message);
   }
 }
 
-const SCALE_FILTER = `scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,format=yuv420p`;
+// 🔥 720p بدل 1080p - يقلل الذاكرة 60%
+const W = 1280;
+const H = 720;
+const SCALE_FILTER = `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},format=yuv420p`;
 
 app.post('/', async (req, res) => {
   const tmpDir = `/tmp/render_${Date.now()}`;
   fs.mkdirSync(tmpDir, { recursive: true });
 
   try {
-    const { scenes, fps = 24 } = req.body;
+    const { scenes, fps = 20 } = req.body;
 
     if (!scenes || !Array.isArray(scenes)) {
       return res.status(400).json({ error: 'scenes array مطلوب' });
@@ -74,14 +77,15 @@ app.post('/', async (req, res) => {
         execSafe(`ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t ${duration} -q:a 9 -acodec libmp3lame "${audioPath}" -y`);
       }
 
-      // 🔥 كل مشهد بنفس الإعدادات تماماً لضمان c:copy لاحقاً
       const sceneFinal = path.join(tmpDir, `scene_${sceneNum}.mp4`);
       execSafe(
         `ffmpeg -loop 1 -i "${imgPath}" -i "${audioPath}" ` +
         `-vf "${SCALE_FILTER}" ` +
         `-t ${duration} -r ${fps} ` +
-        `-c:v libx264 -preset ultrafast -crf 26 -pix_fmt yuv420p ` +
-        `-c:a aac -ar 44100 -ac 2 -b:a 128k ` +
+        `-c:v libx264 -preset ultrafast -crf 28 ` +
+        `-pix_fmt yuv420p ` +
+        `-threads 2 ` +
+        `-c:a aac -ar 44100 -ac 2 -b:a 96k ` +
         `-movflags +faststart ` +
         `-shortest "${sceneFinal}" -y`
       );
@@ -89,7 +93,6 @@ app.post('/', async (req, res) => {
       sceneVideos.push(sceneFinal);
       fs.unlinkSync(imgPath);
       fs.unlinkSync(audioPath);
-
       console.log(`✅ مشهد ${sceneNum} جاهز`);
     }
 
@@ -97,12 +100,8 @@ app.post('/', async (req, res) => {
     fs.writeFileSync(concatFile, sceneVideos.map(v => `file '${v}'`).join('\n'));
 
     const finalVideo = path.join(tmpDir, 'final_video.mp4');
-
-    // 🔥 c:copy = لا re-encoding = لا OOM
     execSafe(
-      `ffmpeg -f concat -safe 0 -i "${concatFile}" ` +
-      `-c copy -movflags +faststart ` +
-      `"${finalVideo}" -y`
+      `ffmpeg -f concat -safe 0 -i "${concatFile}" -c copy -movflags +faststart "${finalVideo}" -y`
     );
 
     const videoBuffer = fs.readFileSync(finalVideo);
