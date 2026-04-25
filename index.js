@@ -23,8 +23,6 @@ function downloadFile(url, dest) {
       file.on('finish', () => {
         file.close();
         const stats = fs.statSync(dest);
-
-        // 🔥 تحقق أقوى من الصورة
         if (stats.size < 5000) {
           reject(new Error(`الصورة تالفة أو صغيرة: ${url}`));
         } else {
@@ -43,21 +41,18 @@ function writeBase64File(base64, dest) {
   fs.writeFileSync(dest, buffer);
 }
 
-// 🔥 فلتر KenBurns احترافي وثابت
-function buildKenBurnsFilter(duration, fps) {
-  const frames = duration * fps;
-
-  return `
-    scale=1920:1080:force_original_aspect_ratio=cover,
-    crop=1920:1080,
-    zoompan=z='min(zoom+0.0008,1.2)':
-    x='iw/2-(iw/zoom/2)':
-    y='ih/2-(ih/zoom/2)':
-    d=${frames}:
-    s=1920x1080:
-    fps=${fps},
-    format=yuv420p
-  `.replace(/\s+/g, '');
+// 🔥 KenBurns خفيف على الذاكرة - d ثابت بدل duration*fps
+function buildKenBurnsFilter(fps) {
+  const internalFps = Math.min(fps, 25);
+  return (
+    `scale=8000:-1,` +
+    `zoompan=z='min(zoom+0.0015,1.5)':` +
+    `x='iw/2-(iw/zoom/2)':` +
+    `y='ih/2-(ih/zoom/2)':` +
+    `d=${internalFps * 2}:` +
+    `s=1920x1080:fps=${internalFps},` +
+    `format=yuv420p`
+  );
 }
 
 app.post('/', async (req, res) => {
@@ -78,45 +73,55 @@ app.post('/', async (req, res) => {
       const sceneNum = i + 1;
       const duration = scene.duration || 3;
 
+      console.log(`🎬 معالجة مشهد ${sceneNum}/${scenes.length}`);
+
+      // تحميل الصورة
       const imgPath = path.join(tmpDir, `img_${sceneNum}.jpg`);
       await downloadFile(scene.imageUrl, imgPath);
 
+      // الصوت
       const audioPath = path.join(tmpDir, `audio_${sceneNum}.mp3`);
-
       if (scene.audioBase64) {
         writeBase64File(scene.audioBase64, audioPath);
       } else {
-        execSync(`ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t ${duration} -q:a 9 -acodec libmp3lame "${audioPath}" -y`);
+        execSync(
+          `ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t ${duration} -q:a 9 -acodec libmp3lame "${audioPath}" -y`,
+          { stdio: 'pipe', maxBuffer: 10 * 1024 * 1024 }
+        );
       }
 
       const videoNoAudio = path.join(tmpDir, `scene_noaudio_${sceneNum}.mp4`);
-      const kbFilter = buildKenBurnsFilter(duration, fps);
+      const kbFilter = buildKenBurnsFilter(fps);
 
       try {
         execSync(
-          `ffmpeg -loop 1 -i "${imgPath}" -vf "${kbFilter}" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset fast -crf 23 "${videoNoAudio}" -y`,
-          { stdio: 'pipe' }
+          `ffmpeg -loop 1 -i "${imgPath}" -vf "${kbFilter}" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset ultrafast -crf 26 "${videoNoAudio}" -y`,
+          { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 120000 }
         );
+        console.log(`✅ KenBurns نجح للمشهد ${sceneNum}`);
       } catch (err) {
-        console.log('⚠️ فشل KenBurns - بنستخدم fallback');
-
-        // 🔥 fallback بدون zoompan
+        console.log(`⚠️ فشل KenBurns للمشهد ${sceneNum} - fallback`);
         execSync(
-          `ffmpeg -loop 1 -i "${imgPath}" -vf "scale=1920:1080:force_original_aspect_ratio=cover,crop=1920:1080,format=yuv420p" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset fast -crf 23 "${videoNoAudio}" -y`,
-          { stdio: 'pipe' }
+          `ffmpeg -loop 1 -i "${imgPath}" -vf "scale=1920:1080:force_original_aspect_ratio=cover,crop=1920:1080,format=yuv420p" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset ultrafast -crf 26 "${videoNoAudio}" -y`,
+          { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 120000 }
         );
       }
 
       const sceneFinal = path.join(tmpDir, `scene_${sceneNum}.mp4`);
-
       execSync(
         `ffmpeg -i "${videoNoAudio}" -i "${audioPath}" -c:v copy -c:a aac -shortest "${sceneFinal}" -y`,
-        { stdio: 'pipe' }
+        { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 }
       );
 
       sceneVideos.push(sceneFinal);
+
+      // 🔥 حذف الملفات المؤقتة فوراً لتحرير الذاكرة
+      fs.unlinkSync(imgPath);
+      fs.unlinkSync(audioPath);
+      fs.unlinkSync(videoNoAudio);
     }
 
+    // دمج المشاهد
     const concatFile = path.join(tmpDir, 'concat.txt');
     fs.writeFileSync(
       concatFile,
@@ -124,10 +129,9 @@ app.post('/', async (req, res) => {
     );
 
     const finalVideo = path.join(tmpDir, 'final_video.mp4');
-
     execSync(
       `ffmpeg -f concat -safe 0 -i "${concatFile}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k "${finalVideo}" -y`,
-      { stdio: 'inherit' }
+      { stdio: 'inherit', maxBuffer: 100 * 1024 * 1024, timeout: 300000 }
     );
 
     const videoBuffer = fs.readFileSync(finalVideo);
@@ -149,4 +153,3 @@ const port = process.env.PORT || 8080;
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
 });
-
