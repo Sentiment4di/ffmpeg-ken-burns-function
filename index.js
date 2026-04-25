@@ -41,7 +41,6 @@ function writeBase64File(base64, dest) {
   fs.writeFileSync(dest, buffer);
 }
 
-// 🔥 scale بدون cover - متوافق مع ffmpeg 5.x
 const SCALE_FILTER = `scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,format=yuv420p`;
 
 function buildKenBurnsFilter(fps) {
@@ -55,6 +54,20 @@ function buildKenBurnsFilter(fps) {
     `s=1920x1080:fps=${internalFps},` +
     `format=yuv420p`
   );
+}
+
+function execSafe(cmd, opts = {}) {
+  try {
+    return execSync(cmd, {
+      stdio: 'pipe',
+      maxBuffer: 100 * 1024 * 1024,
+      timeout: 180000,
+      ...opts
+    });
+  } catch (err) {
+    const msg = err.stderr ? err.stderr.toString() : err.message;
+    throw new Error(msg);
+  }
 }
 
 app.post('/', async (req, res) => {
@@ -75,7 +88,7 @@ app.post('/', async (req, res) => {
       const sceneNum = i + 1;
       const duration = scene.duration || 3;
 
-      console.log(`🎬 معالجة مشهد ${sceneNum}/${scenes.length}`);
+      console.log(`🎬 مشهد ${sceneNum}/${scenes.length}`);
 
       const imgPath = path.join(tmpDir, `img_${sceneNum}.jpg`);
       await downloadFile(scene.imageUrl, imgPath);
@@ -84,38 +97,38 @@ app.post('/', async (req, res) => {
       if (scene.audioBase64) {
         writeBase64File(scene.audioBase64, audioPath);
       } else {
-        execSync(
-          `ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t ${duration} -q:a 9 -acodec libmp3lame "${audioPath}" -y`,
-          { stdio: 'pipe', maxBuffer: 10 * 1024 * 1024 }
+        execSafe(
+          `ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t ${duration} -q:a 9 -acodec libmp3lame "${audioPath}" -y`
         );
       }
 
       const videoNoAudio = path.join(tmpDir, `scene_noaudio_${sceneNum}.mp4`);
-      const kbFilter = buildKenBurnsFilter(fps);
 
       try {
-        execSync(
-          `ffmpeg -loop 1 -i "${imgPath}" -vf "${kbFilter}" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset ultrafast -crf 26 "${videoNoAudio}" -y`,
-          { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 120000 }
+        execSafe(
+          `ffmpeg -loop 1 -i "${imgPath}" -vf "${buildKenBurnsFilter(fps)}" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset ultrafast -crf 26 "${videoNoAudio}" -y`
         );
-        console.log(`✅ KenBurns نجح للمشهد ${sceneNum}`);
+        console.log(`✅ KenBurns نجح`);
       } catch (err) {
-        console.log(`⚠️ فشل KenBurns - fallback للمشهد ${sceneNum}`);
-        execSync(
-          `ffmpeg -loop 1 -i "${imgPath}" -vf "${SCALE_FILTER}" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset ultrafast -crf 26 "${videoNoAudio}" -y`,
-          { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 120000 }
+        console.log(`⚠️ KenBurns فشل - fallback\n${err.message}`);
+        execSafe(
+          `ffmpeg -loop 1 -i "${imgPath}" -vf "${SCALE_FILTER}" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset ultrafast -crf 26 "${videoNoAudio}" -y`
         );
       }
 
+      // 🔥 دمج الفيديو والصوت مع إعادة encoding كامل لضمان التوافق
       const sceneFinal = path.join(tmpDir, `scene_${sceneNum}.mp4`);
-      execSync(
-        `ffmpeg -i "${videoNoAudio}" -i "${audioPath}" -c:v copy -c:a aac -shortest "${sceneFinal}" -y`,
-        { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 }
+      execSafe(
+        `ffmpeg -i "${videoNoAudio}" -i "${audioPath}" ` +
+        `-c:v libx264 -preset ultrafast -crf 26 ` +
+        `-c:a aac -ar 44100 -ac 2 -b:a 128k ` +
+        `-pix_fmt yuv420p ` +
+        `-movflags +faststart ` +
+        `-shortest "${sceneFinal}" -y`
       );
 
       sceneVideos.push(sceneFinal);
 
-      // تحرير الذاكرة بعد كل مشهد
       fs.unlinkSync(imgPath);
       fs.unlinkSync(audioPath);
       fs.unlinkSync(videoNoAudio);
@@ -128,9 +141,15 @@ app.post('/', async (req, res) => {
     );
 
     const finalVideo = path.join(tmpDir, 'final_video.mp4');
-    execSync(
-      `ffmpeg -f concat -safe 0 -i "${concatFile}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k "${finalVideo}" -y`,
-      { stdio: 'inherit', maxBuffer: 100 * 1024 * 1024, timeout: 300000 }
+
+    // 🔥 concat مع re-encode كامل لضمان عدم تعارض الـ streams
+    execSafe(
+      `ffmpeg -f concat -safe 0 -i "${concatFile}" ` +
+      `-c:v libx264 -preset fast -crf 22 ` +
+      `-c:a aac -ar 44100 -ac 2 -b:a 128k ` +
+      `-pix_fmt yuv420p ` +
+      `-movflags +faststart ` +
+      `"${finalVideo}" -y`
     );
 
     const videoBuffer = fs.readFileSync(finalVideo);
