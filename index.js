@@ -41,7 +41,9 @@ function writeBase64File(base64, dest) {
   fs.writeFileSync(dest, buffer);
 }
 
-// 🔥 KenBurns خفيف على الذاكرة - d ثابت بدل duration*fps
+// 🔥 scale بدون cover - متوافق مع ffmpeg 5.x
+const SCALE_FILTER = `scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,format=yuv420p`;
+
 function buildKenBurnsFilter(fps) {
   const internalFps = Math.min(fps, 25);
   return (
@@ -75,11 +77,9 @@ app.post('/', async (req, res) => {
 
       console.log(`🎬 معالجة مشهد ${sceneNum}/${scenes.length}`);
 
-      // تحميل الصورة
       const imgPath = path.join(tmpDir, `img_${sceneNum}.jpg`);
       await downloadFile(scene.imageUrl, imgPath);
 
-      // الصوت
       const audioPath = path.join(tmpDir, `audio_${sceneNum}.mp3`);
       if (scene.audioBase64) {
         writeBase64File(scene.audioBase64, audioPath);
@@ -100,9 +100,9 @@ app.post('/', async (req, res) => {
         );
         console.log(`✅ KenBurns نجح للمشهد ${sceneNum}`);
       } catch (err) {
-        console.log(`⚠️ فشل KenBurns للمشهد ${sceneNum} - fallback`);
+        console.log(`⚠️ فشل KenBurns - fallback للمشهد ${sceneNum}`);
         execSync(
-          `ffmpeg -loop 1 -i "${imgPath}" -vf "scale=1920:1080:force_original_aspect_ratio=cover,crop=1920:1080,format=yuv420p" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset ultrafast -crf 26 "${videoNoAudio}" -y`,
+          `ffmpeg -loop 1 -i "${imgPath}" -vf "${SCALE_FILTER}" -t ${duration} -r ${fps} -pix_fmt yuv420p -c:v libx264 -preset ultrafast -crf 26 "${videoNoAudio}" -y`,
           { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 120000 }
         );
       }
@@ -115,13 +115,12 @@ app.post('/', async (req, res) => {
 
       sceneVideos.push(sceneFinal);
 
-      // 🔥 حذف الملفات المؤقتة فوراً لتحرير الذاكرة
+      // تحرير الذاكرة بعد كل مشهد
       fs.unlinkSync(imgPath);
       fs.unlinkSync(audioPath);
       fs.unlinkSync(videoNoAudio);
     }
 
-    // دمج المشاهد
     const concatFile = path.join(tmpDir, 'concat.txt');
     fs.writeFileSync(
       concatFile,
