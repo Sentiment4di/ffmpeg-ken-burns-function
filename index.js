@@ -6,7 +6,8 @@ const https = require('https');
 const http = require('http');
 
 const app = express();
-app.use(express.json({ limit: '500mb' }));
+app.use(express.json({ type: '*/*', limit: '500mb' }));
+
 
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
