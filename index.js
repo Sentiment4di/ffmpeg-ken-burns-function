@@ -8,7 +8,6 @@ const http = require('http');
 const app = express();
 app.use(express.json({ type: '*/*', limit: '500mb' }));
 
-
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
@@ -19,7 +18,15 @@ function downloadFile(url, dest) {
         return downloadFile(res.headers.location, dest).then(resolve).catch(reject);
       }
       res.pipe(file);
-      file.on('finish', () => file.close(resolve));
+      file.on('finish', () => {
+        file.close();
+        const stats = fs.statSync(dest);
+        if (stats.size < 1000) {
+          reject(new Error(`الصورة المحملة تالفة أو صغيرة جداً من الرابط: ${url}`));
+        } else {
+          resolve();
+        }
+      });
     }).on('error', err => {
       fs.unlink(dest, () => {});
       reject(err);
@@ -34,7 +41,7 @@ function writeBase64File(base64, dest) {
 
 function buildKenBurnsFilter(type, duration, fps) {
   const frames = duration * fps;
-  return `scale=1920:-1,zoompan=z='min(zoom+0.0008,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=1920x1080:fps=${fps}`;
+  return `scale=1920:-2,zoompan=z='min(zoom+0.0008,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=1920x1080:fps=${fps}`;
 }
 
 app.post('/', async (req, res) => {
@@ -68,16 +75,24 @@ app.post('/', async (req, res) => {
       const videoNoAudio = path.join(tmpDir, `scene_noaudio_${sceneNum}.mp4`);
       const kbFilter = buildKenBurnsFilter(kenType, duration, fps);
 
-      execSync(
-        `ffmpeg -loop 1 -i "${imgPath}" -vf "${kbFilter},format=yuv420p" -t ${duration} -r ${fps} -c:v libx264 -preset fast -crf 23 "${videoNoAudio}" -y`,
-        { stdio: 'inherit' }
-      );
+      try {
+        execSync(
+          `ffmpeg -loop 1 -i "${imgPath}" -vf "${kbFilter},format=yuv420p" -t ${duration} -r ${fps} -c:v libx264 -preset fast -crf 23 "${videoNoAudio}" -y`,
+          { stdio: 'pipe' }
+        );
+      } catch (ffmpegErr) {
+        throw new Error(`خطأ في معالجة صورة المشهد ${sceneNum}: ` + ffmpegErr.stderr.toString());
+      }
 
       const sceneFinal = path.join(tmpDir, `scene_${sceneNum}.mp4`);
-      execSync(
-        `ffmpeg -i "${videoNoAudio}" -i "${audioPath}" -c:v copy -c:a aac -shortest "${sceneFinal}" -y`,
-        { stdio: 'inherit' }
-      );
+      try {
+        execSync(
+          `ffmpeg -i "${videoNoAudio}" -i "${audioPath}" -c:v copy -c:a aac -shortest "${sceneFinal}" -y`,
+          { stdio: 'pipe' }
+        );
+      } catch (ffmpegErr) {
+         throw new Error(`خطأ في دمج صوت المشهد ${sceneNum}: ` + ffmpegErr.stderr.toString());
+      }
 
       sceneVideos.push(sceneFinal);
     }
@@ -94,7 +109,6 @@ app.post('/', async (req, res) => {
 
     const videoBuffer = fs.readFileSync(finalVideo);
     
-    // إرسال كملف فيديو مباشر ليقبله n8n
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', 'attachment; filename="story.mp4"');
     res.send(videoBuffer);
